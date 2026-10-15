@@ -7035,6 +7035,13 @@ static void sofia_handle_sip_r_invite(switch_core_session_t *session, int status
 			if (sofia_test_flag(tech_pvt, TFLAG_SENT_UPDATE)) {
 				sofia_clear_flag_locked(tech_pvt, TFLAG_SENT_UPDATE);
 
+				if (status > 299 && switch_channel_test_flag(channel, CF_ANSWERED)) {
+					/* A failed re-INVITE leaves the previous offer/answer in force. sofia_glue_do_invite
+					   cleared TFLAG_SDP when it sent the offer; restore it, or the next re-INVITE arriving
+					   on this leg is taken for an initial INVITE and never answered. */
+					sofia_set_flag_locked(tech_pvt, TFLAG_SDP);
+				}
+
 				if ((uuid = switch_channel_get_partner_uuid(channel)) && (other_session = switch_core_session_locate(uuid))) {
 					const char *r_sdp = NULL;
 					switch_core_session_message_t *msg;
@@ -7064,6 +7071,10 @@ static void sofia_handle_sip_r_invite(switch_core_session_t *session, int status
 
 					if (status == 491 && (switch_channel_test_flag(tech_pvt->channel, CF_T38_PASSTHRU) ||
 										  switch_channel_test_flag(channel, CF_PROXY_MODE))) {
+						/* Answering the other leg directly skips SWITCH_MESSAGE_INDICATE_RESPOND, the only
+						   place its TFLAG_REINVITED is cleared. Clear it here, or every later re-INVITE
+						   arriving on this leg is answered 491 locally with nothing pending. */
+						sofia_clear_flag(other_tech_pvt, TFLAG_REINVITED);
 						nua_respond(other_tech_pvt->nh, SIP_491_REQUEST_PENDING, TAG_END());
 						switch_core_session_rwunlock(other_session);
 						goto end;
@@ -7078,6 +7089,8 @@ static void sofia_handle_sip_r_invite(switch_core_session_t *session, int status
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Could not parse T.38 options from sdp.\n");
 							switch_channel_set_variable(channel, SWITCH_ENDPOINT_DISPOSITION_VARIABLE, "T.38 NEGOTIATION ERROR");
 							switch_channel_hangup(channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
+							/* Also skips SWITCH_MESSAGE_INDICATE_RESPOND; do not leave the other leg flagged. */
+							sofia_clear_flag(other_tech_pvt, TFLAG_REINVITED);
 							switch_core_session_rwunlock(other_session);
 							goto end;
 						} else {

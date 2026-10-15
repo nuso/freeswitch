@@ -1666,7 +1666,34 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 			if (!switch_channel_test_flag(channel, CF_PROXY_MEDIA)) {
 				switch_channel_set_flag(channel, CF_REQ_MEDIA);
 			}
-			sofia_glue_do_invite(session);
+
+			if (sofia_glue_do_invite(session) != SWITCH_STATUS_SUCCESS) {
+				switch_core_session_t *other_session;
+
+				/* No re-INVITE went out, so no response will ever arrive to relay back. Answer the
+				   other leg's pending re-INVITE now and clear its TFLAG_REINVITED, which is otherwise
+				   cleared only by SWITCH_MESSAGE_INDICATE_RESPOND. */
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "%s Media re-direct INVITE not sent\n",
+								  switch_channel_get_name(channel));
+				sofia_clear_flag_locked(tech_pvt, TFLAG_SENT_UPDATE);
+
+				/* sofia_glue_do_invite cleared TFLAG_SDP before failing; the previous offer/answer stands. */
+				if (switch_channel_test_flag(channel, CF_ANSWERED)) {
+					sofia_set_flag_locked(tech_pvt, TFLAG_SDP);
+				}
+
+				if (switch_core_session_get_partner(session, &other_session) == SWITCH_STATUS_SUCCESS) {
+					if (switch_core_session_compare(session, other_session)) {
+						private_object_t *other_tech_pvt = switch_core_session_get_private(other_session);
+
+						if (sofia_test_flag(other_tech_pvt, TFLAG_REINVITED)) {
+							sofia_clear_flag(other_tech_pvt, TFLAG_REINVITED);
+							nua_respond(other_tech_pvt->nh, SIP_500_INTERNAL_SERVER_ERROR, TAG_END());
+						}
+					}
+					switch_core_session_rwunlock(other_session);
+				}
+			}
 
 		}
 		break;
@@ -2343,6 +2370,9 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 
 				if (code == 302 && !zstr(msg->string_arg)) {
 					char *p;
+
+					/* A relayed 302 from the far side lands here too; it is still a final answer. */
+					sofia_clear_flag(tech_pvt, TFLAG_REINVITED);
 
 					if ((p = strchr(msg->string_arg, ' '))) {
 						*p = '\0';
